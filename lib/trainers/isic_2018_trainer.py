@@ -109,14 +109,16 @@ class ISIC2018Trainer:
         for batch_idx, (input_tensor, target) in enumerate(self.train_data_loader):
 
             # use non_blocking=True to overlap host->device copies with computation
-            input_tensor, target = input_tensor.to(self.device, non_blocking=True), target.to(self.device, non_blocking=True)
+            input_tensor = input_tensor.to(self.device, non_blocking=True)
+            target = target.to(self.device, non_blocking=True)
             output = self.model(input_tensor)
             dice_loss = self.loss_function(output, target)
             dice_loss.backward()
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            self.calculate_metric_and_update_statistcs(output.cpu().float(), target.cpu().float(), len(target), dice_loss.cpu(), mode="train")
+            # compute and accumulate metrics on device, only transfer small summaries to CPU
+            self.calculate_metric_and_update_statistcs(output, target, len(target), dice_loss, mode="train")
 
             if (batch_idx + 1) % self.terminal_show_freq == 0:
                 train_class_IoU = self.statistics_dict["train"]["total_area_intersect"] / self.statistics_dict["train"]["total_area_union"]
@@ -151,11 +153,13 @@ class ISIC2018Trainer:
         with torch.no_grad():
 
             for batch_idx, (input_tensor, target) in enumerate(self.valid_data_loader):
-                input_tensor, target = input_tensor.to(self.device, non_blocking=True), target.to(self.device, non_blocking=True)
+                input_tensor = input_tensor.to(self.device, non_blocking=True)
+                target = target.to(self.device, non_blocking=True)
 
                 output = self.model(input_tensor)
 
-                self.calculate_metric_and_update_statistcs(output.cpu(), target.cpu(), len(target), mode="valid")
+                # compute metrics on device and transfer summaries
+                self.calculate_metric_and_update_statistcs(output, target, len(target), mode="valid")
 
             cur_JI = self.statistics_dict["valid"]["JI_sum"] / self.statistics_dict["valid"]["count"]
 
@@ -172,36 +176,82 @@ class ISIC2018Trainer:
             return update_flag
 
     def calculate_metric_and_update_statistcs(self, output, target, cur_batch_size, loss=None, mode="train"):
-        mask = torch.zeros(self.opt["classes"])
+        # output: (B, C, H, W), target: (B, H, W) on device
+        # build mask of present classes in this batch (on device)
         unique_index = torch.unique(target).int()
+        mask = torch.zeros(self.opt["classes"], device=target.device, dtype=torch.uint8)
         for index in unique_index:
             mask[index] = 1
+
+        # update counts
         self.statistics_dict[mode]["count"] += cur_batch_size
         for i, class_name in self.opt["index_to_class_dict"].items():
-            if mask[i] == 1:
+            if mask[i]:
                 self.statistics_dict[mode]["class_count"][class_name] += cur_batch_size
-        if mode == "train":
+
+        if mode == "train" and loss is not None:
+            # keep loss aggregation on CPU scalar
             self.statistics_dict[mode]["loss"] += loss.item() * cur_batch_size
+
+        # predictions
+        probs = None
+        preds = None
         for metric_name, metric_func in self.metric.items():
             if metric_name == "IoU":
+                # metric_func likely returns torch hist tensors; call it and accumulate
                 area_intersect, area_union, _, _ = metric_func(output, target)
-                self.statistics_dict[mode]["total_area_intersect"] += area_intersect.numpy()
-                self.statistics_dict[mode]["total_area_union"] += area_union.numpy()
-            elif metric_name == "ACC":
-                batch_mean_ACC = metric_func(output, target)
-                self.statistics_dict[mode]["ACC_sum"] += batch_mean_ACC * cur_batch_size
-            elif metric_name == "JI":
-                batch_mean_JI = metric_func(output, target)
-                self.statistics_dict[mode]["JI_sum"] += batch_mean_JI * cur_batch_size
+                self.statistics_dict[mode]["total_area_intersect"] += area_intersect.cpu().numpy()
+                self.statistics_dict[mode]["total_area_union"] += area_union.cpu().numpy()
             elif metric_name == "DSC":
-                batch_mean_DSC = metric_func(output, target)
+                # compute Dice on device without converting whole tensors to numpy
+                if probs is None:
+                    # use the normalization defined by metric if available
+                    try:
+                        norm = metric_func.normalization
+                        probs = norm(output)
+                    except Exception:
+                        probs = torch.softmax(output, dim=1)
+                    preds = torch.argmax(probs, dim=1)
+                # compute per-sample dice for foreground class and mean
+                # assume binary foreground class index 1
+                fore = 1 if self.opt["classes"] > 1 else 1
+                pred_fg = (preds == fore).float()
+                gt_fg = (target == fore).float()
+                inter = (pred_fg * gt_fg).view(pred_fg.size(0), -1).sum(dim=1)
+                sums = pred_fg.view(pred_fg.size(0), -1).sum(dim=1) + gt_fg.view(gt_fg.size(0), -1).sum(dim=1)
+                dice_per_sample = (2.0 * inter) / (sums + 1e-6)
+                batch_mean_DSC = float(dice_per_sample.mean().item())
                 self.statistics_dict[mode]["DSC_sum"] += batch_mean_DSC * cur_batch_size
+            elif metric_name == "JI":
+                # Jaccard = intersection / union
+                if preds is None:
+                    preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                pred_fg = (preds == 1).float()
+                gt_fg = (target == 1).float()
+                inter = (pred_fg * gt_fg).view(pred_fg.size(0), -1).sum(dim=1)
+                union = ((pred_fg + gt_fg) > 0).view(pred_fg.size(0), -1).sum(dim=1)
+                ji_per_sample = inter / (union + 1e-6)
+                batch_mean_JI = float(ji_per_sample.mean().item())
+                self.statistics_dict[mode]["JI_sum"] += batch_mean_JI * cur_batch_size
+            elif metric_name == "ACC":
+                if preds is None:
+                    preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                acc_per_sample = (preds == target).view(preds.size(0), -1).float().mean(dim=1)
+                batch_mean_ACC = float(acc_per_sample.mean().item())
+                self.statistics_dict[mode]["ACC_sum"] += batch_mean_ACC * cur_batch_size
             else:
+                # fallback: call metric_func and try to aggregate per-class results
                 per_class_metric = metric_func(output, target)
-                per_class_metric = per_class_metric * mask
-                self.statistics_dict[mode][metric_name]["avg"] += (torch.sum(per_class_metric) / torch.sum(mask)).item() * cur_batch_size
+                # per_class_metric either torch tensor or numpy; ensure torch
+                if isinstance(per_class_metric, torch.Tensor):
+                    per = per_class_metric
+                else:
+                    per = torch.as_tensor(per_class_metric, device=target.device)
+                per = per * mask.to(per.device)
+                avg = (torch.sum(per) / torch.sum(mask.to(per.device))).item() if torch.sum(mask) > 0 else 0.0
+                self.statistics_dict[mode][metric_name]["avg"] += avg * cur_batch_size
                 for j, class_name in self.opt["index_to_class_dict"].items():
-                    self.statistics_dict[mode][metric_name][class_name] += per_class_metric[j].item() * cur_batch_size
+                    self.statistics_dict[mode][metric_name][class_name] += float(per[j].cpu().item()) * cur_batch_size
 
     def init_statistics_dict(self):
         statistics_dict = {

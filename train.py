@@ -12,6 +12,13 @@ import os
 import nni
 import torch
 
+import cv2
+# avoid OpenCV internal thread contention with DataLoader workers
+cv2.setNumThreads(0)
+
+# enable cudnn benchmark for potentially faster conv kernels (tradeoff: determinism)
+torch.backends.cudnn.benchmark = True
+
 from lib import utils, dataloaders, models, losses, metrics, trainers
 
 params_3D_CBCT_Tooth = {
@@ -509,6 +516,7 @@ def parse_args():
     parser.add_argument("-dim", "--dimension", type=str, default="2d", help="dimension of dataset images and models")
     parser.add_argument("-s", "--scaling_version", type=str, default="TINY", help="scaling version of PMFSNet")
     parser.add_argument("--epoch", type=int, default=None, help="training epoch")
+    parser.add_argument("--no_augment", action='store_true', help="disable heavy CPU augmentations for faster debugging")
     args = parser.parse_args()
     return args
 
@@ -544,9 +552,11 @@ def main():
         params["pretrain"] = args.pretrain_weight
     params["dimension"] = args.dimension
     params["scaling_version"] = args.scaling_version
+    params["no_augment"] = getattr(args, "no_augment", False)
     if args.epoch is not None:
         params["end_epoch"] = args.epoch
-        params["save_epoch_freq"] = args.epoch // 4
+        # ensure save frequency is at least 1 to avoid division/modulo by zero
+        params["save_epoch_freq"] = max(1, args.epoch // 4)
 
 
     if params["optimize_params"]:

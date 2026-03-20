@@ -62,10 +62,12 @@ def get_dataloader(opt, train_images_path_list=None, train_labels_path_list=None
 
         # For 2D image datasets we add worker_init_fn, persistent_workers and prefetch when num_workers>0
         if opt.get("num_workers", 0) > 0:
+            # training loader: heavier settings to maximize throughput
             train_loader = DataLoader(train_set, batch_size=opt["batch_size"], shuffle=True, num_workers=opt["num_workers"], pin_memory=True,
-                                      persistent_workers=True, prefetch_factor=2, worker_init_fn=worker_init_fn)
-            valid_loader = DataLoader(valid_set, batch_size=opt["batch_size"], shuffle=False, num_workers=opt["num_workers"], pin_memory=True,
-                                      persistent_workers=True, prefetch_factor=2, worker_init_fn=worker_init_fn)
+                                      persistent_workers=True, prefetch_factor=2, worker_init_fn=worker_init_fn, drop_last=True)
+            # validation loader: keep light to avoid stealing CPU from training
+            valid_loader = DataLoader(valid_set, batch_size=opt["batch_size"], shuffle=False, num_workers=1, pin_memory=True,
+                                      worker_init_fn=worker_init_fn)
         else:
             train_loader = DataLoader(train_set, batch_size=opt["batch_size"], shuffle=True, num_workers=opt["num_workers"], pin_memory=True)
             valid_loader = DataLoader(valid_set, batch_size=opt["batch_size"], shuffle=False, num_workers=opt["num_workers"], pin_memory=True)
