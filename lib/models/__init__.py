@@ -34,6 +34,7 @@ from .MultiResUNet3D import MultiResUNet3D
 from .PMFSNet import PMFSNet
 from .xbwPMFSNet import xbwPMFSNet
 from .xbwPMFSNetV2 import xbwPMFSNetV2
+from .xbwPMFSNetEdgeAux import xbwPMFSNetEdgeAux
 from .MSA_MobileNetV2_UNet import MSA_MobileNetV2_UNet
 from .PSPNet import PSPNet
 from .R2AttentionUNet import R2AttentionU_Net
@@ -210,6 +211,9 @@ def get_model_optimizer_lr_scheduler(opt):
 
         elif opt["model_name"] == "xbwPMFSNetV2":
             model = xbwPMFSNetV2(in_channels=opt["in_channels"], out_channels=opt["classes"], dim=opt["dimension"], scaling_version=opt["scaling_version"])
+
+        elif opt["model_name"] == "xbwPMFSNetEdgeAux":
+            model = xbwPMFSNetEdgeAux(in_channels=opt["in_channels"], out_channels=opt["classes"], dim=opt["dimension"], scaling_version=opt["scaling_version"])
 
         elif opt["model_name"] == "MobileNetV2":
             model = MobileNetV2(in_channels=opt["in_channels"], out_channels=opt["classes"], input_size=opt["resize_shape"][0], width_mult=1.)
@@ -475,6 +479,9 @@ def get_model(opt):
 
         elif opt["model_name"] == "xbwPMFSNetV2":
             model = xbwPMFSNetV2(in_channels=opt["in_channels"], out_channels=opt["classes"], dim=opt["dimension"], scaling_version=opt["scaling_version"])
+
+        elif opt["model_name"] == "xbwPMFSNetEdgeAux":
+            model = xbwPMFSNetEdgeAux(in_channels=opt["in_channels"], out_channels=opt["classes"], dim=opt["dimension"], scaling_version=opt["scaling_version"])
 
         elif opt["model_name"] == "MobileNetV2":
             model = MobileNetV2(in_channels=opt["in_channels"], out_channels=opt["classes"], input_size=opt["resize_shape"][0], width_mult=1.)
